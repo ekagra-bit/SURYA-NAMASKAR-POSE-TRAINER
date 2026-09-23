@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Yoga Pose Trainer</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <main class="app-shell">
+        <section id="heroPage" class="screen hero-screen">
+            <div class="hero-orb hero-orb-left"></div>
+            <div class="hero-orb hero-orb-right"></div>
+            <div class="hero-card">
+                <p class="hero-eyebrow">AI-POWERED</p>
+                <h1 class="hero-title">Surya Namaskar Trainer</h1>
+                <p class="hero-copy">Real-time pose detection with corrective feedback for Surya Namaskar.</p>
+                <button id="startBtn" class="primary-btn">Begin Session</button>
+
+                <section class="pose-overview">
+                    <p class="overview-label">SURYA NAMASKAR . 12 POSES</p>
+                    <div id="poseList" class="pose-grid"></div>
+                </section>
+
+                <div class="feature-row">
+                    <span>Camera Detection</span>
+                    <span>Real-time Scoring</span>
+                    <span>Live Feedback</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="sessionPage" class="screen session-screen is-hidden">
+            <div class="session-shell">
+                <header class="session-header">
+                    <div>
+                        <p id="poseCount" class="session-kicker">POSE 1 / 12</p>
+                        <h2 id="poseName" class="session-title">Prayer Pose</h2>
+                        <p id="poseSanskrit" class="session-subtitle">Pranamasana</p>
+                    </div>
+                    <button id="endBtn" class="ghost-btn">End</button>
+                </header>
+
+                <div class="session-stage">
+                    <aside class="reference-card">
+                        <p class="reference-label">Reference Asana</p>
+                        <img id="guideImg" class="reference-image" alt="Reference pose" />
+                        <p class="reference-copy">Use this image as your guide while staying fully visible in the camera frame.</p>
+                    </aside>
+
+                    <div class="camera-wrap">
+                        <div class="camera-frame">
+                            <video id="webcam" autoplay muted playsinline></video>
+                            <canvas id="poseCanvas"></canvas>
+                            <div id="framingHint" class="framing-hint">
+                                Move back so your full body fits inside the frame.
+                            </div>
+                            <div id="cameraPlaceholder" class="camera-placeholder">
+                                <div class="placeholder-frame">
+                                    <span class="placeholder-lock">Camera Off</span>
+                                    <p>Allow camera access to begin the guided session.</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p id="poseStatus" class="pose-status">Match the guided pose and hold it steady for two seconds.</p>
+                    </div>
+                </div>
+
+                <div class="progress-track">
+                    <div id="progressFill" class="progress-fill"></div>
+                </div>
+
+                <div class="metric-row">
+                    <article class="metric-card">
+                        <span class="metric-label">Accuracy</span>
+                        <strong id="accuracyValue" class="metric-value">0%</strong>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">Stability</span>
+                        <strong id="stabilityValue" class="metric-value">0%</strong>
+                    </article>
+                    <article class="metric-card">
+                        <span class="metric-label">Reps</span>
+                        <strong id="repsValue" class="metric-value">0</strong>
+                    </article>
+                </div>
+
+                <nav class="session-nav">
+                    <button id="prevPose" class="nav-btn">&larr; Previous</button>
+                    <button id="nextPose" class="nav-btn">Next &rarr;</button>
+                </nav>
+            </div>
+        </section>
+
+        <div class="support-elements" aria-hidden="true">
+            <img id="exampleImg" alt="" />
+            <canvas id="exampleCanvas" width="320" height="240"></canvas>
+        </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-layers"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    <script src="reference_data.js"></script>
+    <script>
+        window.addEventListener("load", () => {
+            let detector = null;
+            let webcamStream = null;
+            let exampleKeypoints = null;
+            let previousKeypoints = null;
+            let latestJointScores = {};
+            let scoreHistory = [];
+            let holdStartTime = null;
+            let poseLocked = false;
+            let isSessionActive = false;
+            let currentPoseIndex = 0;
+            let completedRounds = 0;
+            let lastDisplayUpdate = 0;
+            let webcamLoopTimer = null;
+            let isProcessingFrame = false;
+
+            // MODEL LOADING
+            let poseScoreModel = null;
+            let poseScoreModelLoadFailed = false;
+            let poseScoreModelUsesGraphExecutor = false;
+            let exampleModelVector = null;
+
+            const HOLD_THRESHOLD = 80;
+            const HOLD_DURATION = 2000;
+            const SMOOTH_WINDOW = 20;
+            const DISPLAY_UPDATE_INTERVAL = 250;
+            const CAMERA_CAPTURE_WIDTH = 1280;
+            const CAMERA_CAPTURE_HEIGHT = 720;
+            const CAMERA_TARGET_FPS = 30;
+            const INFERENCE_INTERVAL = 200;
+            const INFERENCE_MAX_WIDTH = 512;
+            const POSE_SCORE_MODEL_URL = "web_model/model.json";
+            const POSE_SCORE_MODEL_FALLBACK_URL = "web_model/model.json";
+            const MODEL_KEYPOINT_ORDER = [
+                "nose",
+                "left_eye",
+                "right_eye",
+                "left_ear",
+                "right_ear",
+                "left_shoulder",
+                "right_shoulder",
+                "left_elbow",
+                "right_elbow",
+                "left_wrist",
+                "right_wrist",
+                "left_hip",
+                "right_hip",
+                "left_knee",
+                "right_knee",
+                "left_ankle",
+                "right_ankle"
+            ];
+            const MODEL_INPUT_SIZE = 34;
+
+            const poses = [
+                { key: "pranamasana", title: "Prayer Pose", sanskrit: "Pranamasana", img: "images/pranamasana.png" },
+                { key: "hasta_uttanasana", title: "Raised Arms", sanskrit: "Hasta Uttanasana", img: "images/hasta_uttanasana.png" },
+                { key: "padahastasana", title: "Standing Forward Bend", sanskrit: "Padahastasana", img: "images/padahastasana.png" },
+                { key: "ashwa_sanchalanasana_left", title: "Equestrian Pose", sanskrit: "Ashwa Sanchalanasana", img: "images/ashwa.png" },
+                { key: "dandasana", title: "Plank Pose", sanskrit: "Dandasana", img: "images/dandasana.png" },
+                { key: "ashtanga_namaskara", title: "Eight-Limbed Pose", sanskrit: "Ashtanga Namaskara", img: "images/ashtanga.png" },
+                { key: "bhujangasana", title: "Cobra Pose", sanskrit: "Bhujangasana", img: "images/bhujangasana.png" },
+                { key: "adho_mukha_svanasana", title: "Downward Dog", sanskrit: "Adho Mukha Svanasana", img: "images/adho_mukha_svanasana.png" },
+                { key: "ashwa_sanchalanasana_right", title: "Equestrian Pose", sanskrit: "Ashwa Sanchalanasana", img: "images/ashwa_opposite.png" },
+                { key: "padahastasana_return", title: "Forward Bend", sanskrit: "Padahastasana", img: "images/padahastasana_2.png" },
+                { key: "hasta_uttanasana_return", title: "Raised Arms", sanskrit: "Hasta Uttanasana", img: "images/hasta_uttanasana_2.png" },
+                { key: "pranamasana_return", title: "Prayer Pose", sanskrit: "Pranamasana", img: "images/pranamasana_2.png" }
+            ];
+
+            const poseByKey = Object.fromEntries(poses.map((pose) => [pose.key, pose]));
+            const requiredJoints = {
+                pranamasana: ["leftElbow", "rightElbow", "leftShoulder", "rightShoulder"],
+                hasta_uttanasana: ["leftShoulder", "rightShoulder", "leftHip", "rightHip"],
+                padahastasana: ["leftHip", "rightHip", "leftKnee", "rightKnee"],
+                ashwa_sanchalanasana_left: ["leftKnee", "rightKnee", "leftHip", "rightHip"],
+                dandasana: ["leftElbow", "rightElbow", "leftShoulder", "rightShoulder", "leftHip", "rightHip"],
+                ashtanga_namaskara: ["leftElbow", "rightElbow", "leftShoulder", "rightShoulder"],
+                bhujangasana: ["leftShoulder", "rightShoulder", "leftElbow", "rightElbow"],
+                adho_mukha_svanasana: ["leftShoulder", "rightShoulder", "leftHip", "rightHip"],
+                ashwa_sanchalanasana_right: ["leftKnee", "rightKnee", "leftHip", "rightHip"],
+                padahastasana_return: ["leftHip", "rightHip", "leftKnee", "rightKnee"],
+                hasta_uttanasana_return: ["leftShoulder", "rightShoulder", "leftHip", "rightHip"],
+                pranamasana_return: ["leftElbow", "rightElbow", "leftShoulder", "rightShoulder"]
+            };
+
+            const skeletonConnections = [
+                ["left_shoulder", "right_shoulder"],
+                ["left_shoulder", "left_elbow"],
+                ["left_elbow", "left_wrist"],
+                ["right_shoulder", "right_elbow"],
+                ["right_elbow", "right_wrist"],
+                ["left_shoulder", "left_hip"],
+                ["right_shoulder", "right_hip"],
+                ["left_hip", "right_hip"],
+                ["left_hip", "left_knee"],
+                ["left_knee", "left_ankle"],
+                ["right_hip", "right_knee"],
+                ["right_knee", "right_ankle"]
+            ];
+
+            const heroPage = document.getElementById("heroPage");
+            const sessionPage = document.getElementById("sessionPage");
+            const startBtn = document.getElementById("startBtn");
+            const endBtn = document.getElementById("endBtn");
+            const prevPoseBtn = document.getElementById("prevPose");
+            const nextPoseBtn = document.getElementById("nextPose");
+            const poseList = document.getElementById("poseList");
+            const poseCount = document.getElementById("poseCount");
+            const poseName = document.getElementById("poseName");
+            const poseSanskrit = document.getElementById("poseSanskrit");
+            const poseStatus = document.getElementById("poseStatus");
+            const progressFill = document.getElementById("progressFill");
+            const guideImg = document.getElementById("guideImg");
+            const accuracyValue = document.getElementById("accuracyValue");
+            const stabilityValue = document.getElementById("stabilityValue");
+            const repsValue = document.getElementById("repsValue");
+            const webcam = document.getElementById("webcam");
+            const poseCanvas = document.getElementById("poseCanvas");
+            const poseCtx = poseCanvas.getContext("2d", { desynchronized: true });
+            const cameraPlaceholder = document.getElementById("cameraPlaceholder");
+            const framingHint = document.getElementById("framingHint");
+            const exampleImg = document.getElementById("exampleImg");
+            const exampleCanvas = document.getElementById("exampleCanvas");
+            const exampleCtx = exampleCanvas.getContext("2d");
+            const inferenceCanvas = document.createElement("canvas");
+            const inferenceCtx = inferenceCanvas.getContext("2d", { alpha: false, desynchronized: true });
+
+            function renderPoseList() {
+                poseList.innerHTML = poses.map((pose, index) => `
+                    <div class="pose-chip">
+                        <img class="pose-chip-thumb" src="${pose.img}" alt="${pose.title}" />
+                        <div class="pose-chip-copy">
+                            <span class="pose-chip-index">${index + 1}.</span>
+                            <span>${pose.title}</span>
+                        </div>
+                    </div>
+                `).join("");
+            }
+
+            function updateVisiblePoseMeta() {
+                const currentPose = poses[currentPoseIndex];
+                poseCount.textContent = `POSE ${currentPoseIndex + 1} / ${poses.length}`;
+                poseName.textContent = currentPose.title;
+                poseSanskrit.textContent = currentPose.sanskrit;
+                guideImg.src = currentPose.img;
+                guideImg.alt = currentPose.title;
+                const progress = poses.length === 1 ? 100 : (currentPoseIndex / (poses.length - 1)) * 100;
+                progressFill.style.width = `${progress}%`;
+            }
+
+            function resetTrackingState() {
+                previousKeypoints = null;
+                latestJointScores = {};
+                scoreHistory = [];
+                holdStartTime = null;
+                poseLocked = false;
+                lastDisplayUpdate = 0;
+            }
+
+            function resetSessionMetrics() {
+                accuracyValue.textContent = "0%";
+                stabilityValue.textContent = "0%";
+                repsValue.textContent = "0";
+            }
+
+            function resetLiveMetrics() {
+                accuracyValue.textContent = "0%";
+                stabilityValue.textContent = "0%";
+                lastDisplayUpdate = 0;
+            }
+
+            function resetLiveAnalysis() {
+                resetTrackingState();
+                resetLiveMetrics();
+            }
+
+            function clearWebcamLoop() {
+                if (webcamLoopTimer !== null) {
+                    window.clearTimeout(webcamLoopTimer);
+                    webcamLoopTimer = null;
+                }
+            }
+
+            function scheduleNextWebcamTick(delay = INFERENCE_INTERVAL) {
+                if (!isSessionActive) return;
+                clearWebcamLoop();
+                webcamLoopTimer = window.setTimeout(() => {
+                    webcamLoopTimer = null;
+                    void processWebcam();
+                }, delay);
+            }
+
+            // MODEL LOADING
+            async function loadPoseScoreModel() {
+                if (poseScoreModel || poseScoreModelLoadFailed) return poseScoreModel;
+
+                const loaders = [
+                    {
+                        usesGraphExecutor: false,
+                        load: () => tf.loadLayersModel("web_model/model.json")
+                    },
+                    {
+                        usesGraphExecutor: false,
+                        load: () => tf.loadLayersModel(POSE_SCORE_MODEL_FALLBACK_URL)
+                    },
+                    {
+                        usesGraphExecutor: true,
+                        load: () => tf.loadGraphModel(POSE_SCORE_MODEL_URL)
+                    },
+                    {
+                        usesGraphExecutor: true,
+                        load: () => tf.loadGraphModel(POSE_SCORE_MODEL_FALLBACK_URL)
+                    }
+                ];
+
+                let lastError = null;
+
+                for (const loader of loaders) {
+                    try {
+                        poseScoreModel = await loader.load();
+                        poseScoreModelUsesGraphExecutor = loader.usesGraphExecutor;
+                        return poseScoreModel;
+                    } catch (error) {
+                        lastError = error;
+                    }
+                }
+
+                console.warn("Pose score model unavailable; using angle + embedding only.", lastError);
+                poseScoreModelLoadFailed = true;
+                poseScoreModelUsesGraphExecutor = false;
+                poseScoreModel = null;
+                return null;
+            }
+
+            async function initDetector() {
+                if (detector) return detector;
+                await tf.ready();
+                detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet,
+                    {
+                        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+                        enableSmoothing: true
+                    }
+                );
+
+                // MODEL LOADING
+                await loadPoseScoreModel();
+
+                return detector;
+            }
+
+            function resizeInferenceCanvas(sourceWidth, sourceHeight) {
+                if (!sourceWidth || !sourceHeight) return;
+                const scale = Math.min(1, INFERENCE_MAX_WIDTH / sourceWidth);
+                inferenceCanvas.width = Math.max(1, Math.round(sourceWidth * scale));
+                inferenceCanvas.height = Math.max(1, Math.round(sourceHeight * scale));
+            }
+
+            function loadReferencePoseImage() {
+                updateVisiblePoseMeta();
+                exampleKeypoints = null;
+                exampleModelVector = null;
+
+                return new Promise((resolve) => {
+                    const currentPose = poses[currentPoseIndex];
+                    exampleImg.onload = async () => {
+                        try {
+                            await initDetector();
+                            exampleCanvas.width = exampleImg.naturalWidth || 320;
+                            exampleCanvas.height = exampleImg.naturalHeight || 240;
+                            exampleCtx.clearRect(0, 0, exampleCanvas.width, exampleCanvas.height);
+                            exampleCtx.drawImage(exampleImg, 0, 0, exampleCanvas.width, exampleCanvas.height);
+                            const result = await detector.estimatePoses(exampleCanvas, { flipHorizontal: false });
+                            exampleKeypoints = result[0]?.keypoints ?? null;
+                            exampleModelVector = normalizeKeypointsForModel(exampleKeypoints);
+                        } catch (error) {
+                            console.error(error);
+                            exampleKeypoints = null;
+                            exampleModelVector = null;
+                        } finally {
+                            resolve();
+                        }
+                    };
+
+                    exampleImg.onerror = () => {
+                        exampleKeypoints = null;
+                        exampleModelVector = null;
+                        resolve();
+                    };
+
+                    exampleImg.src = "";
+                    exampleImg.src = currentPose.img;
+                });
+            }
+
+            async function startWebcam() {
+                webcamStream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: CAMERA_CAPTURE_WIDTH },
+                        height: { ideal: CAMERA_CAPTURE_HEIGHT },
+                        aspectRatio: { ideal: 16 / 9 },
+                        frameRate: { ideal: CAMERA_TARGET_FPS, max: CAMERA_TARGET_FPS },
+                        facingMode: "user"
+                    }
+                });
+                webcam.srcObject = webcamStream;
+
+                const videoTrack = webcamStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    if ("contentHint" in videoTrack) {
+                        videoTrack.contentHint = "motion";
+                    }
+                    try {
+                        await videoTrack.applyConstraints({
+                            width: { ideal: CAMERA_CAPTURE_WIDTH },
+                            height: { ideal: CAMERA_CAPTURE_HEIGHT },
+                            frameRate: { ideal: CAMERA_TARGET_FPS, max: CAMERA_TARGET_FPS }
+                        });
+                    } catch (error) {
+                        console.warn("Camera constraints could not be fully applied.", error);
+                    }
+                }
+
+                return new Promise((resolve) => {
+                    webcam.onloadedmetadata = () => {
+                        webcam.play();
+                        const videoWidth = webcam.videoWidth || 1280;
+                        const videoHeight = webcam.videoHeight || 720;
+                        poseCanvas.width = videoWidth;
+                        poseCanvas.height = videoHeight;
+                        resizeInferenceCanvas(videoWidth, videoHeight);
+                        cameraPlaceholder.classList.add("is-hidden");
+                        resolve();
+                    };
+                });
+            }
+
+            function stopWebcam() {
+                clearWebcamLoop();
+                if (webcamStream) webcamStream.getTracks().forEach((track) => track.stop());
+                webcamStream = null;
+                webcam.srcObject = null;
+                isProcessingFrame = false;
+                poseCtx.clearRect(0, 0, poseCanvas.width, poseCanvas.height);
+                cameraPlaceholder.classList.remove("is-hidden");
+                framingHint.textContent = "Move back so your full body fits inside the frame.";
+                framingHint.classList.remove("is-good");
+            }
+
+            function getVisiblePoints(keypoints, names) {
+                return names
+                    .map((name) => keypoints.find((point) => point.name === name && point.score > 0.25))
+                    .filter(Boolean);
+            }
+
+            function getFramingState(keypoints) {
+                const defaultState = {
+                    message: "Move back so your full body fits inside the frame.",
+                    isGood: false,
+                    isScorable: false
+                };
+                if (!keypoints || !keypoints.length || !poseCanvas.width || !poseCanvas.height) {
+                    return defaultState;
+                }
+
+                const visible = keypoints.filter((point) => point.score > 0.25);
+                if (visible.length < 8) {
+                    return {
+                        message: "Step fully into the frame so your body can be detected.",
+                        isGood: false,
+                        isScorable: false
+                    };
+                }
+
+                const headPoints = getVisiblePoints(keypoints, ["nose", "left_eye", "right_eye", "left_ear", "right_ear"]);
+                const shoulderPoints = getVisiblePoints(keypoints, ["left_shoulder", "right_shoulder"]);
+                const hipPoints = getVisiblePoints(keypoints, ["left_hip", "right_hip"]);
+                const footPoints = getVisiblePoints(keypoints, ["left_ankle", "right_ankle"]);
+                const torsoAnchorCount = shoulderPoints.length + hipPoints.length;
+                const currentPoseKey = poses[currentPoseIndex].key;
+                const currentRequired = requiredJoints[currentPoseKey] || [];
+                const userAngles = extractAngles(keypoints);
+                const visibleRequired = currentRequired.filter((joint) => userAngles?.[joint] != null).length;
+                const minimumVisibleRequired = currentRequired.length
+                    ? Math.min(currentRequired.length, Math.max(2, Math.ceil(currentRequired.length * 0.5)))
+                    : 2;
+                const minX = Math.min(...visible.map((point) => point.x));
+                const maxX = Math.max(...visible.map((point) => point.x));
+                const minY = Math.min(...visible.map((point) => point.y));
+                const maxY = Math.max(...visible.map((point) => point.y));
+
+                const warnings = [];
+                if (torsoAnchorCount < 3) {
+                    warnings.push("Turn toward the camera so your torso is visible.");
+                }
+                if (!headPoints.length || minY < poseCanvas.height * 0.08) {
+                    warnings.push("Move farther back so your head stays visible.");
+                }
+                if (footPoints.length < 2 || maxY > poseCanvas.height * 0.94) {
+                    warnings.push("Move farther back so both feet stay visible.");
+                }
+                if (minX < poseCanvas.width * 0.06 || maxX > poseCanvas.width * 0.94) {
+                    warnings.push("Center your body in the frame.");
+                }
+                if (maxY - minY > poseCanvas.height * 0.88) {
+                    warnings.push("You are too close to the camera.");
+                }
+
+                const isScorable = visible.length >= 7
+                    && torsoAnchorCount >= 3
+                    && visibleRequired >= minimumVisibleRequired;
+
+                return {
+                    message: warnings[0] || "Framing looks good for full-body capture.",
+                    isGood: warnings.length === 0,
+                    isScorable
+                };
+            }
+
+            function updateFramingHint(framingState = null) {
+                const state = framingState || {
+                    message: "Move back so your full body fits inside the frame.",
+                    isGood: false
+                };
+                framingHint.textContent = state.message;
+                framingHint.classList.toggle("is-good", Boolean(state.isGood));
+            }
+
+            function calculateMovement(currentKeypoints) {
+                if (!previousKeypoints) {
+                    previousKeypoints = currentKeypoints;
+                    return 0;
+                }
+
+                let totalMovement = 0;
+                let count = 0;
+                currentKeypoints.forEach((point, index) => {
+                    const previousPoint = previousKeypoints[index];
+                    if (!previousPoint) return;
+                    if (point.score < 0.3 || previousPoint.score < 0.3) return;
+                    totalMovement += Math.hypot(point.x - previousPoint.x, point.y - previousPoint.y);
+                    count += 1;
+                });
+                previousKeypoints = currentKeypoints;
+                return count ? totalMovement / count : 0;
+            }
+
+            function calculateAngle(pointA, pointB, pointC) {
+                if (!pointA || !pointB || !pointC) return null;
+                const vectorAB = { x: pointA.x - pointB.x, y: pointA.y - pointB.y };
+                const vectorCB = { x: pointC.x - pointB.x, y: pointC.y - pointB.y };
+                const dot = vectorAB.x * vectorCB.x + vectorAB.y * vectorCB.y;
+                const magnitudeAB = Math.hypot(vectorAB.x, vectorAB.y);
+                const magnitudeCB = Math.hypot(vectorCB.x, vectorCB.y);
+                if (!magnitudeAB || !magnitudeCB) return null;
+                const cosine = dot / (magnitudeAB * magnitudeCB);
+                return Math.acos(Math.max(-1, Math.min(1, cosine))) * (180 / Math.PI);
+            }
+
+            function cosineSimilarity(vectorA, vectorB) {
+                if (!vectorA || !vectorB || !vectorA.length || vectorA.length !== vectorB.length) return 0;
+                let dot = 0;
+                let magnitudeA = 0;
+                let magnitudeB = 0;
+                for (let index = 0; index < vectorA.length; index += 1) {
+                    dot += vectorA[index] * vectorB[index];
+                    magnitudeA += vectorA[index] * vectorA[index];
+                    magnitudeB += vectorB[index] * vectorB[index];
+                }
+                magnitudeA = Math.sqrt(magnitudeA);
+                magnitudeB = Math.sqrt(magnitudeB);
+                if (!magnitudeA || !magnitudeB) return 0;
+                return dot / (magnitudeA * magnitudeB);
+            }
+
+            function embeddingSimilarity(referenceKeypoints, userKeypoints) {
+                if (!referenceKeypoints || !userKeypoints) return 0;
+
+                const comparablePairs = userKeypoints.reduce((pairs, userPoint) => {
+                    if (userPoint.score < 0.3) return pairs;
+                    const referencePoint = referenceKeypoints.find(
+                        (point) => point.name === userPoint.name && point.score > 0.3
+                    );
+                    if (!referencePoint) return pairs;
+                    pairs.push([referencePoint, userPoint]);
+                    return pairs;
+                }, []);
+
+                if (comparablePairs.length < 4) return 0;
+
+                const referenceVector = [];
+                const userVector = [];
+                comparablePairs.forEach(([referencePoint, userPoint]) => {
+                    referenceVector.push(referencePoint.x, referencePoint.y);
+                    userVector.push(userPoint.x, userPoint.y);
+                });
+
+                if (!referenceVector || !userVector) return 0;
+                return Math.max(0, cosineSimilarity(referenceVector, userVector) * 100);
+            }
+
+            function normalizeKeypointsForModel(keypoints) {
+                if (!keypoints || !keypoints.length) return null;
+
+                const keypointsByName = Object.fromEntries(keypoints.map((point) => [point.name, point]));
+                const visiblePoints = keypoints.filter(
+                    (point) => Number.isFinite(point.x) && Number.isFinite(point.y) && (point.score ?? 1) > 0.2
+                );
+                if (visiblePoints.length < 6) return null;
+
+                const minX = Math.min(...visiblePoints.map((point) => point.x));
+                const maxX = Math.max(...visiblePoints.map((point) => point.x));
+                const minY = Math.min(...visiblePoints.map((point) => point.y));
+                const maxY = Math.max(...visiblePoints.map((point) => point.y));
+                const centerX = (minX + maxX) / 2;
+                const centerY = (minY + maxY) / 2;
+                const bodySize = Math.max(maxX - minX, maxY - minY, 1);
+
+                const normalized = [];
+                MODEL_KEYPOINT_ORDER.forEach((name) => {
+                    const point = keypointsByName[name];
+                    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || (point.score ?? 1) <= 0.2) {
+                        normalized.push(0, 0);
+                        return;
+                    }
+
+                    normalized.push(
+                        (point.x - centerX) / bodySize,
+                        (point.y - centerY) / bodySize
+                    );
+                });
+
+                return normalized.length === MODEL_INPUT_SIZE ? normalized : null;
+            }
+
+            // MODEL PREDICTION
+            async function getModelPrediction(userKeypoints, referenceKeypoints) {
+                if (!poseScoreModel || !referenceKeypoints) return null;
+
+                const userModelVector = normalizeKeypointsForModel(userKeypoints);
+                const referenceModelVector = referenceKeypoints === exampleKeypoints && exampleModelVector
+                    ? exampleModelVector
+                    : normalizeKeypointsForModel(referenceKeypoints);
+                if (!userModelVector || !referenceModelVector) return null;
+
+                let xaTensor = null;
+                let xbTensor = null;
+                let predictionResult = null;
+
+                try {
+                    xaTensor = tf.tensor2d([userModelVector], [1, MODEL_INPUT_SIZE], "float32");
+                    xbTensor = tf.tensor2d([referenceModelVector], [1, MODEL_INPUT_SIZE], "float32");
+
+                    predictionResult = poseScoreModelUsesGraphExecutor
+                        ? await poseScoreModel.executeAsync([xaTensor, xbTensor])
+                        : poseScoreModel.predict([xaTensor, xbTensor]);
+
+                    const outputTensor = Array.isArray(predictionResult)
+                        ? predictionResult[0]
+                        : predictionResult;
+                    const [rawScore = 0] = await outputTensor.data();
+
+                    return Math.max(0, Math.min(100, rawScore * 100));
+                } catch (error) {
+                    console.warn("Pose score prediction failed; using angle + embedding only.", error);
+                    poseScoreModelLoadFailed = true;
+                    poseScoreModelUsesGraphExecutor = false;
+                    poseScoreModel = null;
+                    return null;
+                } finally {
+                    if (Array.isArray(predictionResult)) {
+                        predictionResult.forEach((tensor) => tensor.dispose());
+                    } else if (predictionResult) {
+                        predictionResult.dispose();
+                    }
+
+                    if (xaTensor) xaTensor.dispose();
+                    if (xbTensor) xbTensor.dispose();
+                }
+            }
+
+            function extractAngles(keypoints) {
+                if (!keypoints) return null;
+                const get = (name) => {
+                    const point = keypoints.find((candidate) => candidate.name === name);
+                    if (!point || point.score < 0.3) return null;
+                    return point;
+                };
+
+                return {
+                    leftElbow: calculateAngle(get("left_shoulder"), get("left_elbow"), get("left_wrist")),
+                    rightElbow: calculateAngle(get("right_shoulder"), get("right_elbow"), get("right_wrist")),
+                    leftKnee: calculateAngle(get("left_hip"), get("left_knee"), get("left_ankle")),
+                    rightKnee: calculateAngle(get("right_hip"), get("right_knee"), get("right_ankle")),
+                    leftShoulder: calculateAngle(get("left_elbow"), get("left_shoulder"), get("left_hip")),
+                    rightShoulder: calculateAngle(get("right_elbow"), get("right_shoulder"), get("right_hip")),
+                    leftHip: calculateAngle(get("left_shoulder"), get("left_hip"), get("left_knee")),
+                    rightHip: calculateAngle(get("right_shoulder"), get("right_hip"), get("right_knee"))
+                };
+            }
+
+            function compareKeypoints(userKeypoints) {
+                const currentPoseKey = poses[currentPoseIndex].key;
+                const reference = referenceAngles[currentPoseKey];
+                if (!reference) return { score: 0, jointScores: {}, feedback: [] };
+
+                const userAngles = extractAngles(userKeypoints);
+                if (!userAngles) return { score: 0, jointScores: {}, feedback: [] };
+
+                let totalError = 0;
+                let visibleJointCount = 0;
+                const feedback = [];
+                const jointScores = {};
+
+                for (const joint in reference) {
+                    if (userAngles[joint] == null) continue;
+                    const difference = userAngles[joint] - reference[joint];
+                    const absoluteDifference = Math.abs(difference);
+                    jointScores[joint] = Math.max(0, 100 * (1 - absoluteDifference / 30));
+
+                    if (absoluteDifference > 5) {
+                        if (joint.includes("Elbow")) feedback.push(difference > 0 ? `${joint} bend less` : `${joint} bend more`);
+                        if (joint.includes("Knee")) feedback.push(difference > 0 ? `${joint} straighten knee` : `${joint} bend knee more`);
+                        if (joint.includes("Shoulder")) feedback.push(difference > 0 ? `${joint} lower arm` : `${joint} raise arm`);
+                        if (joint.includes("Hip")) feedback.push(difference > 0 ? `${joint} reduce hip angle` : `${joint} bend from hip more`);
+                    }
+
+                    totalError += absoluteDifference;
+                    visibleJointCount += 1;
+                }
+
+                const currentRequired = requiredJoints[currentPoseKey] || [];
+                let visibleRequired = 0;
+                currentRequired.forEach((joint) => {
+                    if (userAngles[joint] != null) visibleRequired += 1;
+                });
+
+                const minimumVisibleRequired = currentRequired.length
+                    ? Math.min(currentRequired.length, Math.max(2, Math.ceil(currentRequired.length * 0.5)))
+                    : 2;
+
+                if (currentRequired.length && visibleRequired < minimumVisibleRequired) {
+                    return { score: 0, jointScores, feedback: [] };
+                }
+                if (visibleJointCount < 2) {
+                    return { score: 0, jointScores, feedback: [] };
+                }
+
+                const averageError = totalError / visibleJointCount;
+                const visibilityRatio = visibleJointCount / Object.keys(reference).length;
+                const baseScore = Math.max(0, 100 * (1 - averageError / 90));
+
+                return {
+                    score: baseScore * Math.pow(visibilityRatio, 2),
+                    jointScores,
+                    feedback: [...new Set(feedback)]
+                };
+            }
+
+            function detectCurrentPose(userKeypoints) {
+                const userAngles = extractAngles(userKeypoints);
+                if (!userAngles) return { pose: null, score: 0 };
+
+                let bestPose = null;
+                let bestScore = 0;
+                for (const poseKey in referenceAngles) {
+                    const reference = referenceAngles[poseKey];
+                    let totalError = 0;
+                    let count = 0;
+
+                    for (const joint in reference) {
+                        if (userAngles[joint] == null) continue;
+                        totalError += Math.abs(userAngles[joint] - reference[joint]);
+                        count += 1;
+                    }
+
+                    if (!count) continue;
+                    const score = Math.max(0, 100 * (1 - (totalError / count) / 90));
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestPose = poseKey;
+                    }
+                }
+
+                return { pose: bestPose, score: bestScore };
+            }
+
+            function calculateStability(scores) {
+                if (scores.length < 2) return 100;
+                const mean = scores.reduce((total, score) => total + score, 0) / scores.length;
+                const variance = scores.reduce((total, score) => total + Math.pow(score - mean, 2), 0) / scores.length;
+                return Math.max(0, Math.min(100, 100 - Math.sqrt(variance) * 10));
+            }
+
+            function drawUserPose(keypoints) {
+                poseCtx.clearRect(0, 0, poseCanvas.width, poseCanvas.height);
+                if (!keypoints) return;
+
+                keypoints.forEach((point) => {
+                    if (point.score < 0.3) return;
+                    poseCtx.beginPath();
+                    poseCtx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
+                    poseCtx.fillStyle = "#ff7b42";
+                    poseCtx.fill();
+                });
+            }
+
+            function drawSkeleton(keypoints) {
+                if (!keypoints) return;
+
+                skeletonConnections.forEach((pair) => {
+                    const pointA = keypoints.find((point) => point.name === pair[0]);
+                    const pointB = keypoints.find((point) => point.name === pair[1]);
+                    if (!pointA || !pointB) return;
+                    if (pointA.score < 0.3 || pointB.score < 0.3) return;
+
+                    let jointName = null;
+                    if (pair.some((name) => name.includes("elbow"))) jointName = pair[0].includes("left") ? "leftElbow" : "rightElbow";
+                    if (pair.some((name) => name.includes("knee"))) jointName = pair[0].includes("left") ? "leftKnee" : "rightKnee";
+                    if (pair.some((name) => name.includes("shoulder"))) jointName = pair[0].includes("left") ? "leftShoulder" : "rightShoulder";
+                    if (pair.some((name) => name.includes("hip"))) jointName = pair[0].includes("left") ? "leftHip" : "rightHip";
+
+                    const jointScore = latestJointScores[jointName];
+                    const color = jointScore !== undefined && jointScore < 70 ? "#ff4d6d" : "#f6f7fb";
+
+                    poseCtx.beginPath();
+                    poseCtx.moveTo(pointA.x, pointA.y);
+                    poseCtx.lineTo(pointB.x, pointB.y);
+                    poseCtx.strokeStyle = color;
+                    poseCtx.lineWidth = 3;
+                    poseCtx.stroke();
+                });
+            }
+
+            function formatPoseName(poseKey) {
+                return poseByKey[poseKey]?.title || poseKey.replaceAll("_", " ");
+            }
+
+            async function setCurrentPoseIndex(nextIndex) {
+                currentPoseIndex = (nextIndex + poses.length) % poses.length;
+                resetTrackingState();
+                await loadReferencePoseImage();
+            }
+
+            async function advancePose() {
+                poseLocked = false;
+                holdStartTime = null;
+
+                if (currentPoseIndex === poses.length - 1) {
+                    completedRounds += 1;
+                    repsValue.textContent = String(completedRounds);
+                    currentPoseIndex = 0;
+                    poseStatus.textContent = "Round complete. Starting again from the first pose.";
+                } else {
+                    currentPoseIndex += 1;
+                    poseStatus.textContent = "Pose locked. Move into the next pose.";
+                }
+
+                resetTrackingState();
+                await loadReferencePoseImage();
+            }
+
+            async function processWebcam() {
+                if (!isSessionActive) return;
+                if (isProcessingFrame) return;
+                if (!detector || webcam.readyState !== 4) {
+                    scheduleNextWebcamTick();
+                    return;
+                }
+
+                isProcessingFrame = true;
+                let keypoints = null;
+                try {
+                    if (!inferenceCanvas.width || !inferenceCanvas.height) {
+                        resizeInferenceCanvas(webcam.videoWidth || 1280, webcam.videoHeight || 720);
+                    }
+                    inferenceCtx.drawImage(webcam, 0, 0, inferenceCanvas.width, inferenceCanvas.height);
+                    const detectedPoses = await detector.estimatePoses(inferenceCanvas, { flipHorizontal: true });
+                    const detectedKeypoints = detectedPoses[0]?.keypoints ?? null;
+                    keypoints = detectedKeypoints?.map((point) => ({
+                        ...point,
+                        x: point.x * (poseCanvas.width / inferenceCanvas.width),
+                        y: point.y * (poseCanvas.height / inferenceCanvas.height)
+                    })) ?? null;
+                } catch (error) {
+                    console.error(error);
+                    poseStatus.textContent = "Model error while reading the webcam.";
+                }
+
+                try {
+                    if (!keypoints || !keypoints.length) {
+                        resetLiveAnalysis();
+                        drawUserPose(null);
+                        poseStatus.textContent = "No pose detected. Step back into the frame.";
+                        updateFramingHint();
+                        return;
+                    }
+
+                    const framingState = getFramingState(keypoints);
+                    updateFramingHint(framingState);
+                    if (!framingState.isScorable) {
+                        resetLiveAnalysis();
+                        drawUserPose(keypoints);
+                        drawSkeleton(keypoints);
+                        poseStatus.textContent = framingState.message;
+                        return;
+                    }
+
+                    const poseMatch = detectCurrentPose(keypoints);
+                    const comparison = compareKeypoints(keypoints);
+                    const movement = calculateMovement(keypoints);
+                    const angleScore = comparison.score || 0;
+                    const embeddingScore = embeddingSimilarity(exampleKeypoints, keypoints);
+                    const modelScore = await getModelPrediction(keypoints, exampleKeypoints);
+
+                    // FINAL SCORE UPDATE
+                    const accuracy = modelScore == null
+                        ? 0.75 * angleScore + 0.25 * embeddingScore
+                        : 0.6 * angleScore + 0.2 * embeddingScore + 0.2 * modelScore;
+
+                    latestJointScores = comparison.jointScores || {};
+                    scoreHistory.push(accuracy);
+                    if (scoreHistory.length > SMOOTH_WINDOW) scoreHistory.shift();
+
+                    const smoothScore = scoreHistory.length
+                        ? scoreHistory.reduce((total, score) => total + score, 0) / scoreHistory.length
+                        : 0;
+                    const stabilityScore = calculateStability(scoreHistory);
+                    const movementStability = Math.max(0, 100 - movement * 200);
+                    const stability = (stabilityScore + movementStability) / 2;
+                    const now = Date.now();
+
+                    if (now - lastDisplayUpdate > DISPLAY_UPDATE_INTERVAL) {
+                        accuracyValue.textContent = `${smoothScore.toFixed(0)}%`;
+                        stabilityValue.textContent = `${stability.toFixed(0)}%`;
+                        lastDisplayUpdate = now;
+                    }
+
+                    const expectedPoseKey = poses[currentPoseIndex].key;
+                    let statusText = poseMatch.pose ? `Detected: ${formatPoseName(poseMatch.pose)}` : "Analyzing your pose";
+                    if (comparison.feedback.length) {
+                        statusText += ` . ${comparison.feedback.slice(0, 2).join(" . ")}`;
+                    }
+
+                    if (poseMatch.pose === expectedPoseKey && smoothScore >= HOLD_THRESHOLD) {
+                        if (!holdStartTime) holdStartTime = Date.now();
+                        if (!poseLocked && Date.now() - holdStartTime >= HOLD_DURATION) {
+                            poseLocked = true;
+                            await advancePose();
+                        }
+                    } else {
+                        holdStartTime = null;
+                        poseLocked = false;
+                    }
+
+                    poseStatus.textContent = statusText;
+                    drawUserPose(keypoints);
+                    drawSkeleton(keypoints);
+                } finally {
+                    isProcessingFrame = false;
+                    if (isSessionActive) scheduleNextWebcamTick();
+                }
+            }
+
+            async function beginSession() {
+                if (isSessionActive) return;
+                heroPage.classList.add("is-hidden");
+                sessionPage.classList.remove("is-hidden");
+                sessionPage.scrollIntoView({ block: "start" });
+
+                currentPoseIndex = 0;
+                completedRounds = 0;
+                resetSessionMetrics();
+                resetTrackingState();
+                updateVisiblePoseMeta();
+                poseStatus.textContent = "Initializing the guided session...";
+
+                try {
+                    await initDetector();
+                    await loadReferencePoseImage();
+                    await startWebcam();
+                    isSessionActive = true;
+                    poseStatus.textContent = "Match the guided pose and hold it steady for two seconds.";
+                    scheduleNextWebcamTick(0);
+                } catch (error) {
+                    console.error(error);
+                    poseStatus.textContent = "Unable to start the camera session.";
+                    endSession();
+                }
+            }
+
+            function endSession() {
+                isSessionActive = false;
+                stopWebcam();
+                resetTrackingState();
+                heroPage.classList.remove("is-hidden");
+                sessionPage.classList.add("is-hidden");
+                poseStatus.textContent = "Match the guided pose and hold it steady for two seconds.";
+            }
+
+            startBtn.addEventListener("click", beginSession);
+            endBtn.addEventListener("click", endSession);
+            prevPoseBtn.addEventListener("click", async () => {
+                await setCurrentPoseIndex(currentPoseIndex - 1);
+            });
+            nextPoseBtn.addEventListener("click", async () => {
+                await setCurrentPoseIndex(currentPoseIndex + 1);
+            });
+            window.addEventListener("beforeunload", stopWebcam);
+
+            renderPoseList();
+            updateVisiblePoseMeta();
+        });
+    </script>
+</body>
+</html>

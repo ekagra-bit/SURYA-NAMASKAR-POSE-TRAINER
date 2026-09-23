@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Reference Extractor</title>
+</head>
+<body>
+
+<h2>Reference Angle Extractor</h2>
+<button onclick="startExtraction()">Extract Reference</button>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+<script>
+let detector;
+
+async function initDetector() {
+    await tf.ready();
+    detector = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet,
+        { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+    );
+}
+
+function calculateAngle(A, B, C) {
+    if (!A || !B || !C) return null;
+
+    const AB = { x: A.x - B.x, y: A.y - B.y };
+    const CB = { x: C.x - B.x, y: C.y - B.y };
+
+    const dot = AB.x * CB.x + AB.y * CB.y;
+    const magAB = Math.hypot(AB.x, AB.y);
+    const magCB = Math.hypot(CB.x, CB.y);
+
+    if (!magAB || !magCB) return null;
+
+    const cosTheta = dot / (magAB * magCB);
+    const angle = Math.acos(Math.max(-1, Math.min(1, cosTheta)));
+
+    return angle * (180 / Math.PI);
+}
+
+function extractAngles(kp) {
+    const get = name => kp.find(p => p.name === name);
+
+    return {
+        leftElbow: calculateAngle(get('left_shoulder'), get('left_elbow'), get('left_wrist')),
+        rightElbow: calculateAngle(get('right_shoulder'), get('right_elbow'), get('right_wrist')),
+        leftKnee: calculateAngle(get('left_hip'), get('left_knee'), get('left_ankle')),
+        rightKnee: calculateAngle(get('right_hip'), get('right_knee'), get('right_ankle')),
+        leftShoulder: calculateAngle(get('left_elbow'), get('left_shoulder'), get('left_hip')),
+        rightShoulder: calculateAngle(get('right_elbow'), get('right_shoulder'), get('right_hip')),
+        leftHip: calculateAngle(get('left_shoulder'), get('left_hip'), get('left_knee')),
+        rightHip: calculateAngle(get('right_shoulder'), get('right_hip'), get('right_knee'))
+    };
+}
+
+function getPrefix(name) {
+    const map = {
+        pranamasana: "p1",
+        hasta_uttanasana: "p2",
+        padahastasana: "p3",
+        ashwa_sanchalanasana_left: "p4",
+        dandasana: "p5",
+        ashtanga_namaskara: "p6",
+        bhujangasana: "p7",
+        adho_mukha_svanasana: "p8",
+        ashwa_sanchalanasana_right: "p9",
+        padahastasana_return: "p10",
+        hasta_uttanasana_return: "p11",
+        pranamasana_return: "p12"
+    };
+    return map[name];
+}
+
+async function extractPose(poseName, count) {
+
+    let collected = [];
+
+    for (let i = 1; i <= count; i++) {
+
+        const img = new Image();
+        const index = String(i).padStart(2, '0');
+        img.src = `/reference/${poseName}/${getPrefix(poseName)}_${index}.png`;
+
+        await new Promise(resolve => img.onload = resolve);
+
+        const pose = await detector.estimatePoses(img);
+        const kp = pose[0]?.keypoints;
+        if (!kp) continue;
+
+        const angles = extractAngles(kp);
+        collected.push(angles);
+    }
+
+    return collected;
+}
+
+function computeMean(data) {
+    const mean = {};
+    const keys = Object.keys(data[0]);
+
+    for (let key of keys) {
+        let sum = 0;
+        let count = 0;
+
+        for (let item of data) {
+            if (item[key] != null) {
+                sum += item[key];
+                count++;
+            }
+        }
+
+        mean[key] = sum / count;
+    }
+
+    return mean;
+}
+
+async function startExtraction() {
+
+    await initDetector();
+
+    const poses = [
+        "pranamasana",
+        "hasta_uttanasana",
+        "padahastasana",
+        "ashwa_sanchalanasana_left",
+        "dandasana",
+        "ashtanga_namaskara",
+        "bhujangasana",
+        "adho_mukha_svanasana",
+        "ashwa_sanchalanasana_right",
+        "padahastasana_return",
+        "hasta_uttanasana_return",
+        "pranamasana_return"
+    ];
+
+    for (let pose of poses) {
+
+        const data = await extractPose(pose, 20);
+
+        if (!data.length) {
+            console.log("No data for:", pose);
+            continue;
+        }
+
+        const mean = computeMean(data);
+
+        console.log("Reference for:", pose);
+        console.log(mean);
+        console.log("-------------------");
+    }
+}
+</script>
+
+</body>
+</html>
